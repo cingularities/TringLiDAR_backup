@@ -18,166 +18,15 @@ library(lidaRtRee)
 library(rgdal)
 library(tidyverse)
 library(sp)
+library(raster)
+library(lidR)
+library(TreeLS)
+
 
 
 
 
 setwd("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS")
-##LIDAR
-#Bring point cloud into Rstudio
-points_georeferenced <- lidR::readLAS("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/TLS_SantaRita_Plot_UB/TLS_SantaRita_UBplot_pointcloud_041922_aligned_CC.las",  filter = "-drop_class 7")
-points <- lidR::readLAS("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/TLS_SantaRita_Plot_UB/TLS_SantaRita_UBplot_pointcloud_021622_17error.las")
-
-#metadata <-readxl::read_xlsx("D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Metadata_SantaRitaMts_Winter2021_2022.xlsx", sheet = 1)
-#tree_metrics = function(point_cloud,tree_ring, ground_data) {
-#identify point cloud center
-xcenter <- mean(points_georeferenced@data$X)
-ycenter <- mean(points_georeferenced@data$Y)
-
-#clip raster based on center and radius
-clip_points_georeferenced <- clip_circle(points_georeferenced, radius = 30, xcenter = xcenter, ycenter =	ycenter)
-
-#writeLAS(clip_points_georeferenced, file = "clip_points_georeferenced_042022.las")
-#plot(clip_points_georeferenced)
-#Identify ground points using a cloth simulation filter algorithm
-points_classified <- classify_ground(clip_points_georeferenced, algorithm = csf(sloop_smooth = FALSE, class_threshold = 0.4, cloth_resolution =  0.25, rigidness = 2))
-
-#Separate the classified point cloud into a ground point cloud and canopy point cloud
-ground_points <- filter_poi(points_classified, Classification == 2)
-canopy_points <- filter_poi(points_classified, Classification == 0)
-#writeLAS(canopy_points, file = "canopy_points_042022.las")
-#Create a grided digital terrain model
-DTM = grid_terrain(ground_points, res = 0.25, algorithm = knnidw(k = 10, p = 2), na.omit())
-DTM@data
-plot(DTM)
-#writeRaster(DTM, file = "DTM_042022.tif")
-#Calculate vegetation height above the ground
-AGL <- normalize_height(canopy_points, DTM, na.rm = TRUE, copy=TRUE)
-
-#Remove points that are below 0
-AGL_clean <- filter_poi(AGL,Z > 0 | Z <35)
-
-#Create canopy height model(raster) from the normalized canopy points
-CHM <- grid_canopy(AGL_clean, res = 0.25, algorithm = p2r(subcircle = 0, na.fill = NULL))
-plot(CHM)
-#Voxelize the canopy point cloud. This thins the point cloud while retaining structure. It speeds processing commands later in the code. 
-#Each point represents a 25 cm cube
-canopy_voxel <- voxelize_points(AGL_clean, res = 0.25)
-#Identify individual trees. Tree tops are identified by a user defined moving window looking for local maximums across CHM
-
-#lidr segmentation and find trees
-treetops_lidR <- find_trees(canopy_voxel, lmf(ws=8, shape = "circular"))
-plot(treetops_lidR)
-#bh_points <- filter_poi(AGL, Z < 3)
-#writeRaster(CHM, file = "CHM_UB_plot.tif")
-#Identified tree tops are the starting points for a region grow routine that adds new pixels to the tree based on some user defined thresholds
-#th_seed = pixel is added to tree if its height is greater than user defined proportion multiplied by local max height
-#For example, if a tree top is 10 m high, and the parameter is set to 0.25, then the pixel needs to be at least 2.5 m high to be added.
-#th_cr = similar to th_seed, except instead of using local max height, it uses mean height of existing region. 
-#Tip: to grow the regions bigger, make th_seed and th_cr have small values (e.g. < 0.25)
-TLS_lidR <- segment_trees(AGL_clean, dalponte2016(chm = CHM, treetops = treetops_rLiDAR, th_tree = 8, th_seed = 0.20,
-                                                      th_cr = 0.20, max_cr = 35, ID = "treeID"))
-#plot(TLS_lidR)
-
-#Calculate a convex hull and draw a polygon for each tree
-metric <- tree_metrics(TLS_lidR, .stdtreemetrics)
-crown_Hull  = delineate_crowns(TLS_lidR)
-crown_Hull@data = dplyr::left_join(crown_Hull@data, metric@data)
-plot(crown_Hull)
-
-writeOGR(treetops_lidR, ".", "TLS_lidR_ITD", 
-         driver = "ESRI Shapefile") 
-writeOGR(crown_Hull, dsn = "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222", layer = "crown_Hull_UB_lidR", driver = "ESRI Shapefile", overwrite_layer = TRUE)
-
-
-
-#watershed ForestTools segmentation
-lin = function(x){x * 0.05 + 0.6}
-#filter low-lying underbrush and spurious treetops
-treetops_ForestTools = vwf(CHM = CHM, winFun = lin, minHeight = 8)
-TLS_ForestTools = mcws(treetops = treetops_lidR, CHM = CHM,format = "polygons", minHeight = 8, verbose = FALSE)
-
-#plot(TLS_ForestTools, col = sample(rainbow(50), length(unique(TLS_ForestTools[])), replace = TRUE), legend = FALSE, xlab = "", ylab = "", xaxt='n', yaxt = 'n')
-plot(TLS_ForestTools, border = "blue", lwd = 0.5, add = TRUE)
-
-writeRaster(CHM, file = "CHM_UB.tif")
-
-
-writeOGR(treetops_ForestTools, ".", "TLS_ForestTools_ITD", 
-         driver = "ESRI Shapefile") 
-writeOGR(TLS_ForestTools, ".", "TLS_ForestTools_crown", 
-         driver = "ESRI Shapefile") 
-
-
-
-
-##rLiDAR
-# Smoothing CHM
-schm<-CHMsmoothing(CHM, "mean", 5)
-# Setting the fws:
-fws<-8 # dimention 5x5
-# Setting the specified height above ground for detectionbreak
-minht<-10
-# Getting the individual tree detection list
-treeList<-FindTreesCHM(schm, fws, minht)
-plot(treeList)
-summary(treeList)
-# Plotting the individual tree location on the CHM
-plot(CHM, main="LiDAR-derived CHM")
-XY<-SpatialPoints(treeList[,1:3]) # Spatial points
-treetops_rLiDAR <- SpatialPointsDataFrame(XY, data.frame(row.names=row.names(XY),
-                                                           ID=1:length(XY)))
-
-TLS_rLiDAR <- ForestCAS(chm = schm, loc = as.data.frame(XY))
-plot(TLS_rLiDAR)
-
-boundaryTrees<-TLS_rLiDAR[[1]]
-# Plotting the individual tree canopy boundary over the CHM
-plot(chm, main="LiDAR-derived CHM")
-# adding tree canopy boundary
-plot(boundaryTrees, add = TRUE, border = 'red', bg = 'transparent')
-
-
-
-
-writeOGR(treetops_rLiDAR, ".", "TLS_rLiDAR_ITD", 
-         driver = "ESRI Shapefile") 
-writeOGR(boundaryTrees, ".", "TLS_rLiDAR_crown", 
-         driver = "ESRI Shapefile") 
-
-
-
-
-######LIDAR TREE METRICS and lidar can be merged with TLS and ground from here
-
-#calculate crown diameter
-crown_Hull[["crown_Diameter"]] = sqrt(crown_Hull[["convhull_area"]]/ pi) * 2 #crown diameter
-
-#calculate tree volume
-#tree volume base number of voxels multiplied by the volume of voxels assigned
-crown_Hull[["tree_volume_cm3"]] = (crown_Hull[["npoints"]]*25)  #vokume cm3
-crown_Hull[["tree_Volume_m3"]] = (crown_Hull[["npoints"]]*25)/1000000  #volume m3
-
-
-#crown_Hull summary based on area and height
-sp_summarise(crown_Hull, variables = c("convhull_area", "Z")) 
-
-#put in data frame and rename columns
-tree_dataframe = as.data.frame(crown_Hull) %>% rename(Height = Z, crown_Area = convhull_area)
-tree_dataframe
-
-##EXPORT
-#Export the convex hull polygons into a shapefile 
-writeOGR(crown_Hull, dsn = "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222", layer = "crown_Hull_UB", driver = "ESRI Shapefile", overwrite_layer = TRUE)
-
-#Export the treetop points into a shapefile. This can be used to understand how trees were identified. Not totally necessary in the workflow. 
-writeOGR(treetops, dsn = "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222", layer = "treetops_UB", driver = "ESRI Shapefile", overwrite_layer = TRUE)
-
-#Export the Canopy Height Model to a .tif
-writeRaster(CHM, "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222CHM_UB", overwrite = TRUE)
-
-write.csv(tree_dataframe, file = "UB_tree_TLS_dataframe.csv")
-
 
 
 
@@ -189,25 +38,27 @@ write.csv(tree_dataframe, file = "UB_tree_TLS_dataframe.csv")
 ############################################ Tree Ring and Ground Fusion ####################################################
 
 #select the path for folder where you have the file to load
-FASY_ground <- read_excel("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/Europe TLS Data/Serial_sampling/metadata_hainich_Mar2019.xlsx")
-FASY_tuc<-read.rwl("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/Europe TLS Data/TLS Data/Hainich_Treerings/Good_FASY.rwl") 
+ground <- read_excel("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/Europe TLS Data/Serial_sampling/metadata_hainich_Mar2019.xlsx")
+tree<-read.rwl("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/Europe TLS Data/TLS Data/Hainich_Treerings/Good_FASY.rwl") 
+lidar = readLAS("D:/projects/Babst_TLidar_Tree_Rings/TLS_SantaRita_UBplot_pointcloud_021622_17error.las")
+
 
 #check the class, you should see "rwl  "data.frame"
-class(FASY_tuc)
+class(tree)
 
 #some basic statistics
-dim(FASY_tuc)
-rwl.stats(FASY_tuc)
+dim(tree)
+rwl.stats(tree)
 options(max.print=1000000)
 
 #Spline
-detrend.rwi <- detrend(rwl = FASY_tuc,method = "Spline")
+detrend.rwi <- detrend(rwl = tree,method = "Spline")
 head(detrend.rwi)
 data.crn <- chron(detrend.rwi, prefix = "Chr", prewhiten = TRUE)
 
 
 #raw tree ring data parsing and mean tree cores
-data.transpose <- detrend.rwi %>% 
+tree.data.parse <- detrend.rwi %>% 
   t() %>%
   as.data.frame() %>%
   rename_with( ~ paste0("year_", .x)) %>%
@@ -224,6 +75,10 @@ data.transpose <- detrend.rwi %>%
 
 
 ##RAW GROUND DATA
+coor <- c(51.079167, 10.453)
+tree23 <- destPoint(coor,110, 76)
+plotcenter <- destPoint(tree23,98, 28.1)
+
 
 tls_ground_coor <- function(coor, dist_azim) {
   
@@ -253,20 +108,179 @@ tls_ground_coor <- function(coor, dist_azim) {
   return(coor_df)
 }
 
+Hainich_plot <- tls_ground_coor(coor, ground) 
 
-UB_plot <- tls_ground_coor(coor, FASY_ground) 
-
-
-
-tr_ground <- FASY_plot_treering %>% left_join(FASY_ground, by = "treeID")
-
-FASY_treering <- data.transpose %>%
+###TREE rings and ground merge#####
+treering_ground <- tree.data.parse %>%
   subset(site == "HF") %>%
   lapply(as.numeric)%>%
   as.data.frame() %>%
   group_by(treeID) %>%
-  summarise(across(-c(site, core),mean, na.rm = TRUE)) %>%
-  left_join(FASY_ground, by = treeID)
+  summarise(across(-c(site, core), mean, na.rm = TRUE)) %>%
+  rev()%>%
+  left_join(ground_final, by = "treeID") 
+
+
+###tree_ring_ground_spatialpoints
+xy <- data.frame(treeID = treering_ground$treeID, X = treering_ground$lon, Y = treering_ground$lat)
+coordinates(xy) <- c("X", "Y")
+proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")  ## for example
+
+tree.points <- spTransform(xy, CRS("+proj=utm +zone=51 ellps=WGS84"))
+ground_final <- res@data %>% left_join(treering_ground, by = "treeID")
+points_tree_ground <- merge(res, treering_ground, by = "treeID") #points SHP
+
+###DBH RECONSTRUCITONS
+diameter.recon <- function(treering_ground){
+  treering_ground[is.na(treering_ground)] <- 0
+  ###DBH### 
+  # Identify the columns that have data of interest
+  year_cols <- which(substr(x = colnames(treering_ground), start = 1, stop = 4) == "year")
+  # Add column with total
+  treering_ground$lp <- rowSums(x = treering_ground[, year_cols], na.rm = TRUE)
+  # Make a copy of that data frame that we will use for percentages
+  lh <- treering_ground
+  lh[, year_cols] <- cumsum(lh[, year_cols])
+  diff <- lh
+  # Do percentage calculations for only those columns with data of interest
+  diff[, year_cols] <- (diff$lp) - (diff[, year_cols])
+  fraction <- lh
+  fraction[, year_cols] <- diff[, year_cols]/diff$lp
+  diameter <- lh
+  diameter[, year_cols] <- as.numeric(fraction$DBH)*fraction[, year_cols]
+  diameter[, year_cols] <- rev(diameter[, year_cols])
+  
+  # Reality check to see that percentages add up to 100
+  
+  
+  
+  
+  all.equal(current = rowSums(data.perc[, year_cols], na.rm = TRUE),
+            target = rep(100, length = nrow(data.perc)))
+  
+  
+  
+  
+  
+  detrend.rwi[is.na(detrend.rwi)] <- 0
+  
+  detrend.rwi.rev <- apply(detrend.rwi, 2, rev)
+  
+  lp <- apply(detrend.rwi.rev, 2, sum)
+  
+  lh <- apply(detrend.rwi, 2, cumsum)
+  
+  
+  
+  diff <- lh
+  
+  for(i in 1:nrow(diff)){diff[i,] <- lp-lh[i,]}
+  
+  fraction <- lh
+  
+  for(i in 1:nrow(fraction)){fraction[i,] <- diff[i,]/lp}
+  
+  diameter <- lh
+  
+  for(i in 1:nrow(diameter)){diameter[i,] <- dbh*fraction[i,]}
+  
+  dbh.annual <- apply(rbind(dbh, diameter), 2, rev)
+  
+  rownames(dbh.annual) <- c(as.numeric(rownames(trw)[1])-1, as.numeric(rownames(trw)))
+  
+  dbh.annual <- dbh.annual[-1,]
+  
+  
+  
+  return(dbh.annual)
+  
+  
+  
+}
+
+write.csv(diameter, file = "diameter.042222.V1.csv")
+
+
+
+##PERCENTAGE DBH####
+# Identify the columns that have data of interest
+year_cols <- which(substr(x = colnames(FASY_treering_ground), start = 1, stop = 4) == "year")
+# Add column with total
+FASY_treering_ground$Total <- rowSums(x = FASY_treering_ground[, year_cols], na.rm = TRUE)
+# Make a copy of that data frame that we will use for percentages
+data.perc <- FASY_treering_ground
+# Do percentage calculations for only those columns with data of interest
+data.perc[, year_cols] <- (data.perc[, year_cols] / data.perc$Total) * 100
+# Reality check to see that percentages add up to 100
+all.equal(current = rowSums(data.perc[, year_cols], na.rm = TRUE),
+          target = rep(100, length = nrow(data.perc)))
+
+
+
+
+
+#lidR_parallelism
+set_lidr_threads(30)
+get_lidr_threads()
+
+
+#Bring point cloud into Rstudio
+#The .las should be in a UTM coordinate system
+
+
+#Voxelize to reduce point cloud density to 1 pnt/5 cubic cm
+points_voxel = voxelize_points(points, 0.03)
+
+##I need a way to delete the points on periphery of the cloud that are outside of the 'plot'
+##I need to know the plot center coordinate and the radius of each plot
+#I have been experimenting with unreferenced point clouds. 
+xrange = range(points$X)
+center_coordx = mean(xrange)
+yrange = range(points$Y)
+center_coordy = mean(yrange)
+points_voxel_clip = clip_circle(points_voxel, center_coordx, center_coordy, 25)
+
+
+##Separate trees from ground using lidr
+points_classify = classify_ground(points_voxel_clip, algorithm = csf(sloop_smooth = TRUE, class_threshold = 0.1, cloth_resolution =  0.5, rigidness = 2))
+
+#Make a point cloud file for just ground points
+ground_points = filter_poi(points_classify, Classification == 2)
+
+#Make a point cloud file for just non-ground (trees) points
+tree_points = filter_poi(points_classify, Classification != 2)
+
+#Create a grided digital terrain model from ground points
+DTM = grid_terrain(ground_points, res = 0.5, algorithm = knnidw(k = 10, p = 2))
+
+#Calculate vertical distance of each tree point above the DTM. This creates a vegetation height point cloud.
+normalized_height = normalize_height(las = tree_points, algorithm = DTM)
+
+#Remove points that are vertically below 0.5 m
+AGL_clean = filter_poi(normalized_height, Z > 0.5)
+
+
+#Identify stems with 'TreeLS'
+
+#Identify tree occurrences for a normalized point cloud. It uses a Hough Transform which is a circle search
+#Merge is a distance between stems. If two occurrences are less than the specified distance, they will be merged. 
+
+tree_map = treeMap(AGL_clean, method = map.hough(min_h = 1, max_h = 3, h_step = 0.5, pixel_size = 0.025, 
+                                                 max_d = 0.85, min_density = 0.1, min_votes = 3), merge = 0.2, positions_only = FALSE)
+
+
+#Plot the voxelized point cloud with the identified tree stems
+x = plot(AGL_clean, color = "Z")
+add_treeMap(x, tree_map, color = 'yellow', size = 2)
+
+#Count the number of unique trees
+unique_trees = unique(tree_map$TreeID)
+length(unique_trees)
+
+#Create 2D point layer showing the locations of the trees
+xymap = treeMap.positions(tree_map)
+
+#Cindy, can you match the ground reference tree locations with the treeMap positions using a spatial join? 
 
 
 
@@ -360,6 +374,161 @@ q1
 
 
 
+
+##LIDAR
+#Bring point cloud into Rstudio
+points_georeferenced <- lidR::readLAS("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/TLS_SantaRita_Plot_UB/TLS_SantaRita_UBplot_pointcloud_041922_aligned_CC.las",  filter = "-drop_class 7")
+points <- lidR::readLAS("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/TLS_SantaRita_Plot_UB/TLS_SantaRita_UBplot_pointcloud_021622_17error.las")
+
+#metadata <-readxl::read_xlsx("D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Metadata_SantaRitaMts_Winter2021_2022.xlsx", sheet = 1)
+#tree_metrics = function(point_cloud,tree_ring, ground_data) {
+#identify point cloud center
+xcenter <- mean(points_georeferenced@data$X)
+ycenter <- mean(points_georeferenced@data$Y)
+
+#clip raster based on center and radius
+clip_points_georeferenced <- clip_circle(points_georeferenced, radius = 30, xcenter = xcenter, ycenter =	ycenter)
+
+#writeLAS(clip_points_georeferenced, file = "clip_points_georeferenced_042022.las")
+#plot(clip_points_georeferenced)
+#Identify ground points using a cloth simulation filter algorithm
+points_classified <- classify_ground(clip_points_georeferenced, algorithm = csf(sloop_smooth = FALSE, class_threshold = 0.4, cloth_resolution =  0.25, rigidness = 2))
+
+#Separate the classified point cloud into a ground point cloud and canopy point cloud
+ground_points <- filter_poi(points_classified, Classification == 2)
+canopy_points <- filter_poi(points_classified, Classification == 0)
+#writeLAS(canopy_points, file = "canopy_points_042022.las")
+#Create a grided digital terrain model
+DTM = grid_terrain(ground_points, res = 0.25, algorithm = knnidw(k = 10, p = 2), na.omit())
+DTM@data
+plot(DTM)
+#writeRaster(DTM, file = "DTM_042022.tif")
+#Calculate vegetation height above the ground
+AGL <- normalize_height(canopy_points, DTM, na.rm = TRUE, copy=TRUE)
+
+#Remove points that are below 0
+AGL_clean <- filter_poi(AGL,Z > 0 | Z <35)
+
+#Create canopy height model(raster) from the normalized canopy points
+CHM <- grid_canopy(AGL_clean, res = 0.25, algorithm = p2r(subcircle = 0, na.fill = NULL))
+plot(CHM)
+#Voxelize the canopy point cloud. This thins the point cloud while retaining structure. It speeds processing commands later in the code. 
+#Each point represents a 25 cm cube
+canopy_voxel <- voxelize_points(AGL_clean, res = 0.25)
+#Identify individual trees. Tree tops are identified by a user defined moving window looking for local maximums across CHM
+
+#lidr segmentation and find trees
+treetops_lidR <- find_trees(canopy_voxel, lmf(ws=8, shape = "circular"))
+plot(treetops_lidR)
+#bh_points <- filter_poi(AGL, Z < 3)
+#writeRaster(CHM, file = "CHM_UB_plot.tif")
+#Identified tree tops are the starting points for a region grow routine that adds new pixels to the tree based on some user defined thresholds
+#th_seed = pixel is added to tree if its height is greater than user defined proportion multiplied by local max height
+#For example, if a tree top is 10 m high, and the parameter is set to 0.25, then the pixel needs to be at least 2.5 m high to be added.
+#th_cr = similar to th_seed, except instead of using local max height, it uses mean height of existing region. 
+#Tip: to grow the regions bigger, make th_seed and th_cr have small values (e.g. < 0.25)
+TLS_lidR <- segment_trees(AGL_clean, dalponte2016(chm = CHM, treetops = treetops_rLiDAR, th_tree = 8, th_seed = 0.20,
+                                                  th_cr = 0.20, max_cr = 35, ID = "treeID"))
+#plot(TLS_lidR)
+
+#Calculate a convex hull and draw a polygon for each tree
+metric <- tree_metrics(TLS_lidR, .stdtreemetrics)
+crown_Hull  = delineate_crowns(TLS_lidR)
+crown_Hull@data = dplyr::left_join(crown_Hull@data, metric@data)
+plot(crown_Hull)
+
+writeOGR(treetops_lidR, ".", "TLS_lidR_ITD", 
+         driver = "ESRI Shapefile") 
+writeOGR(crown_Hull, dsn = "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222", layer = "crown_Hull_UB_lidR", driver = "ESRI Shapefile", overwrite_layer = TRUE)
+
+
+
+#watershed ForestTools segmentation
+lin = function(x){x * 0.05 + 0.6}
+#filter low-lying underbrush and spurious treetops
+treetops_ForestTools = vwf(CHM = CHM, winFun = lin, minHeight = 8)
+TLS_ForestTools = mcws(treetops = treetops_lidR, CHM = CHM,format = "polygons", minHeight = 8, verbose = FALSE)
+
+#plot(TLS_ForestTools, col = sample(rainbow(50), length(unique(TLS_ForestTools[])), replace = TRUE), legend = FALSE, xlab = "", ylab = "", xaxt='n', yaxt = 'n')
+plot(TLS_ForestTools, border = "blue", lwd = 0.5, add = TRUE)
+
+writeRaster(CHM, file = "CHM_UB.tif")
+
+
+writeOGR(treetops_ForestTools, ".", "TLS_ForestTools_ITD", 
+         driver = "ESRI Shapefile") 
+writeOGR(TLS_ForestTools, ".", "TLS_ForestTools_crown", 
+         driver = "ESRI Shapefile") 
+
+
+
+
+##rLiDAR
+# Smoothing CHM
+schm<-CHMsmoothing(CHM, "mean", 5)
+# Setting the fws:
+fws<-8 # dimention 5x5
+# Setting the specified height above ground for detectionbreak
+minht<-10
+# Getting the individual tree detection list
+treeList<-FindTreesCHM(schm, fws, minht)
+plot(treeList)
+summary(treeList)
+# Plotting the individual tree location on the CHM
+plot(CHM, main="LiDAR-derived CHM")
+XY<-SpatialPoints(treeList[,1:3]) # Spatial points
+treetops_rLiDAR <- SpatialPointsDataFrame(XY, data.frame(row.names=row.names(XY),
+                                                         ID=1:length(XY)))
+
+TLS_rLiDAR <- ForestCAS(chm = schm, loc = as.data.frame(XY))
+plot(TLS_rLiDAR)
+
+boundaryTrees<-TLS_rLiDAR[[1]]
+# Plotting the individual tree canopy boundary over the CHM
+plot(chm, main="LiDAR-derived CHM")
+# adding tree canopy boundary
+plot(boundaryTrees, add = TRUE, border = 'red', bg = 'transparent')
+
+
+
+
+writeOGR(treetops_rLiDAR, ".", "TLS_rLiDAR_ITD", 
+         driver = "ESRI Shapefile") 
+writeOGR(boundaryTrees, ".", "TLS_rLiDAR_crown", 
+         driver = "ESRI Shapefile") 
+
+
+
+
+######LIDAR TREE METRICS and lidar can be merged with TLS and ground from here
+
+#calculate crown diameter
+crown_Hull[["crown_Diameter"]] = sqrt(crown_Hull[["convhull_area"]]/ pi) * 2 #crown diameter
+
+#calculate tree volume
+#tree volume base number of voxels multiplied by the volume of voxels assigned
+crown_Hull[["tree_volume_cm3"]] = (crown_Hull[["npoints"]]*25)  #vokume cm3
+crown_Hull[["tree_Volume_m3"]] = (crown_Hull[["npoints"]]*25)/1000000  #volume m3
+
+
+#crown_Hull summary based on area and height
+sp_summarise(crown_Hull, variables = c("convhull_area", "Z")) 
+
+#put in data frame and rename columns
+tree_dataframe = as.data.frame(crown_Hull) %>% rename(Height = Z, crown_Area = convhull_area)
+tree_dataframe
+
+##EXPORT
+#Export the convex hull polygons into a shapefile 
+writeOGR(crown_Hull, dsn = "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222", layer = "crown_Hull_UB", driver = "ESRI Shapefile", overwrite_layer = TRUE)
+
+#Export the treetop points into a shapefile. This can be used to understand how trees were identified. Not totally necessary in the workflow. 
+writeOGR(treetops, dsn = "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222", layer = "treetops_UB", driver = "ESRI Shapefile", overwrite_layer = TRUE)
+
+#Export the Canopy Height Model to a .tif
+writeRaster(CHM, "D://projects//Babst_TLidar_Tree_Rings//CLN_TLS//TLS_SantaRIta_Plot_UB//Output//030222CHM_UB", overwrite = TRUE)
+
+write.csv(tree_dataframe, file = "UB_tree_TLS_dataframe.csv")
 
 
 
