@@ -17,12 +17,12 @@ library(geosphere)
 library(lidaRtRee)
 library(rgdal)
 library(tidyverse)
-library(sp)
+library(sf)
 library(raster)
 library(lidR)
 library(TreeLS)
 
-
+#remotes::install_github('tiagodc/TreeLS')
 
 
 
@@ -40,7 +40,7 @@ setwd("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS")
 #select the path for folder where you have the file to load
 ground <- read_excel("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/Europe TLS Data/Serial_sampling/metadata_hainich_Mar2019.xlsx")
 tree<-read.rwl("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/Europe TLS Data/TLS Data/Hainich_Treerings/Good_FASY.rwl") 
-lidar = readLAS("D:/projects/Babst_TLidar_Tree_Rings/TLS_SantaRita_UBplot_pointcloud_021622_17error.las")
+lidar = lidR::readLAS("D:/projects/Babst_TLidar_Tree_Rings/TLS_SantaRita_UBplot_pointcloud_041922_aligned_CC.las")
 
 
 #check the class, you should see "rwl  "data.frame"
@@ -110,6 +110,7 @@ tls_ground_coor <- function(coor, dist_azim) {
 
 Hainich_plot <- tls_ground_coor(coor, ground) 
 
+
 ###TREE rings and ground merge#####
 treering_ground <- tree.data.parse %>%
   subset(site == "HF") %>%
@@ -118,20 +119,11 @@ treering_ground <- tree.data.parse %>%
   group_by(treeID) %>%
   summarise(across(-c(site, core), mean, na.rm = TRUE)) %>%
   rev()%>%
-  left_join(ground_final, by = "treeID") 
+  left_join(Hainich_plot, by = "treeID") 
 
-
-###tree_ring_ground_spatialpoints
-xy <- data.frame(treeID = treering_ground$treeID, X = treering_ground$lon, Y = treering_ground$lat)
-coordinates(xy) <- c("X", "Y")
-proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")  ## for example
-
-tree.points <- spTransform(xy, CRS("+proj=utm +zone=51 ellps=WGS84"))
-ground_final <- res@data %>% left_join(treering_ground, by = "treeID")
-points_tree_ground <- merge(res, treering_ground, by = "treeID") #points SHP
 
 ###DBH RECONSTRUCITONS
-diameter.recon <- function(treering_ground){
+diameter.recon.ground.tree <- function(treering_ground){
   treering_ground[is.na(treering_ground)] <- 0
   ###DBH### 
   # Identify the columns that have data of interest
@@ -140,7 +132,7 @@ diameter.recon <- function(treering_ground){
   treering_ground$lp <- rowSums(x = treering_ground[, year_cols], na.rm = TRUE)
   # Make a copy of that data frame that we will use for percentages
   lh <- treering_ground
-  lh[, year_cols] <- cumsum(lh[, year_cols])
+  lh[, year_cols] <- sapply(1:ncol(lh[, year_cols]), function(col){rowSums(lh[, year_cols][1:col])})
   diff <- lh
   # Do percentage calculations for only those columns with data of interest
   diff[, year_cols] <- (diff$lp) - (diff[, year_cols])
@@ -148,57 +140,15 @@ diameter.recon <- function(treering_ground){
   fraction[, year_cols] <- diff[, year_cols]/diff$lp
   diameter <- lh
   diameter[, year_cols] <- as.numeric(fraction$DBH)*fraction[, year_cols]
-  diameter[, year_cols] <- rev(diameter[, year_cols])
-  
+
   # Reality check to see that percentages add up to 100
   
-  
-  
-  
-  all.equal(current = rowSums(data.perc[, year_cols], na.rm = TRUE),
-            target = rep(100, length = nrow(data.perc)))
-  
-  
-  
-  
-  
-  detrend.rwi[is.na(detrend.rwi)] <- 0
-  
-  detrend.rwi.rev <- apply(detrend.rwi, 2, rev)
-  
-  lp <- apply(detrend.rwi.rev, 2, sum)
-  
-  lh <- apply(detrend.rwi, 2, cumsum)
-  
-  
-  
-  diff <- lh
-  
-  for(i in 1:nrow(diff)){diff[i,] <- lp-lh[i,]}
-  
-  fraction <- lh
-  
-  for(i in 1:nrow(fraction)){fraction[i,] <- diff[i,]/lp}
-  
-  diameter <- lh
-  
-  for(i in 1:nrow(diameter)){diameter[i,] <- dbh*fraction[i,]}
-  
-  dbh.annual <- apply(rbind(dbh, diameter), 2, rev)
-  
-  rownames(dbh.annual) <- c(as.numeric(rownames(trw)[1])-1, as.numeric(rownames(trw)))
-  
-  dbh.annual <- dbh.annual[-1,]
-  
-  
-  
-  return(dbh.annual)
-  
-  
-  
+return(diameter)
 }
+  
 
-write.csv(diameter, file = "diameter.042222.V1.csv")
+DBH_estimate <- diameter.recon.ground.tree(treering_ground)
+
 
 
 
@@ -218,7 +168,7 @@ all.equal(current = rowSums(data.perc[, year_cols], na.rm = TRUE),
 
 
 
-
+#########LIDAR PROCESSING################
 #lidR_parallelism
 set_lidr_threads(30)
 get_lidr_threads()
@@ -229,34 +179,34 @@ get_lidr_threads()
 
 
 #Voxelize to reduce point cloud density to 1 pnt/5 cubic cm
-points_voxel = voxelize_points(points, 0.03)
+lidar_voxel = voxelize_points(lidar, 0.03)
 
 ##I need a way to delete the points on periphery of the cloud that are outside of the 'plot'
 ##I need to know the plot center coordinate and the radius of each plot
 #I have been experimenting with unreferenced point clouds. 
-xrange = range(points$X)
+xrange = range(lidar$X)
 center_coordx = mean(xrange)
-yrange = range(points$Y)
+yrange = range(lidar$Y)
 center_coordy = mean(yrange)
-points_voxel_clip = clip_circle(points_voxel, center_coordx, center_coordy, 25)
+lidar_voxel_clip = clip_circle(lidar_voxel, center_coordx, center_coordy, 25)
 
 
 ##Separate trees from ground using lidr
-points_classify = classify_ground(points_voxel_clip, algorithm = csf(sloop_smooth = TRUE, class_threshold = 0.1, cloth_resolution =  0.5, rigidness = 2))
+lidar_classify = classify_ground(lidar_voxel_clip, algorithm = csf(sloop_smooth = TRUE, class_threshold = 0.1, cloth_resolution =  0.5, rigidness = 2))
 
-#Make a point cloud file for just ground points
-ground_points = filter_poi(points_classify, Classification == 2)
+#Make a point cloud file for just ground lidar
+ground_lidar = filter_poi(lidar_classify, Classification == 2)
 
-#Make a point cloud file for just non-ground (trees) points
-tree_points = filter_poi(points_classify, Classification != 2)
+#Make a point cloud file for just non-ground (trees) lidar
+tree_lidar = filter_poi(lidar_classify, Classification != 2)
 
-#Create a grided digital terrain model from ground points
-DTM = grid_terrain(ground_points, res = 0.5, algorithm = knnidw(k = 10, p = 2))
+#Create a grided digital terrain model from ground lidar
+DTM = grid_terrain(ground_lidar, res = 0.5, algorithm = knnidw(k = 10, p = 2))
 
 #Calculate vertical distance of each tree point above the DTM. This creates a vegetation height point cloud.
-normalized_height = normalize_height(las = tree_points, algorithm = DTM)
+normalized_height = normalize_height(las = tree_lidar, algorithm = DTM)
 
-#Remove points that are vertically below 0.5 m
+#Remove lidar that are vertically below 0.5 m
 AGL_clean = filter_poi(normalized_height, Z > 0.5)
 
 
@@ -278,9 +228,53 @@ unique_trees = unique(tree_map$TreeID)
 length(unique_trees)
 
 #Create 2D point layer showing the locations of the trees
-xymap = treeMap.positions(tree_map)
+xy_lidar = treeMap.positions(tree_map)
 
-#Cindy, can you match the ground reference tree locations with the treeMap positions using a spatial join? 
+##Cindy, can you match the ground reference tree locations with the treeMap positions using a spatial join? 
+
+######TREERING_GROUND_LIDAR Spatial Join###############
+UB_plot_ground <- read.csv("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/TLS_SantaRita_Plot_UB/UB_UTM.csv")
+UB_plot_lidar <- read.csv("D:/projects/Babst_TLidar_Tree_Rings/UB_stem_locations.csv")
+
+
+###tree_ring_ground_spatialpoints 1
+xy_ground <- data.frame(treeID = UB_plot_ground$plotID, X = UB_plot_ground$lon, Y = UB_plot_ground$lat) ##CONVERTLATTOLONG
+coordinates(xy_ground) <- ~ X + Y
+proj4string(xy_ground) <- CRS("+proj=longlat +ellps=WGS84 +datum=WGS84")  ## for example
+tree.points.ground <- spTransform(xy_ground, CRS("+proj=utm +zone=12 +ellps=WGS84")) %>% st_as_sf()
+
+
+###tree_ring_ground_spatialpoints 2
+xy_ground <- data.frame(treeID = UB_plot_ground$plotID, X = UB_plot_ground$X, Y = UB_plot_ground$Y)
+coordinates(xy_ground) <- c("X", "Y")
+proj4string(xy_ground) <- CRS("+proj=utm +zone=12 +ellps=WGS84")  ## for example
+tree.points.ground <- spTransform(xy_ground, CRS("+proj=utm +zone=12 +ellps=WGS84"))%>% st_as_sf()
+
+
+##lidarspatiapoints
+xy_lidar <- data.frame(lidar_treeID = UB_plot_lidar$TreeID, X = UB_plot_lidar$X, Y = UB_plot_lidar$Y)
+coordinates(xy_lidar) <- c("X", "Y")
+proj4string(xy_lidar) <- CRS("+proj=utm +zone=12 +ellps=WGS84")  ## for example
+tree.points.lidar <- spTransform(xy_lidar, CRS("+proj=utm +zone=12 +ellps=WGS84")) %>% st_as_sf()
+
+st_crs(tree.points.ground) = st_crs(tree.points.lidar)
+tree.points.lidar_buffer = st_buffer(tree.points.lidar, 1.7)
+tree_intersection = st_intersection(tree.points.lidar_buffer, tree.points.ground)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
