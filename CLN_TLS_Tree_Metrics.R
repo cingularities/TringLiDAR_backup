@@ -1,5 +1,5 @@
 # Script segments a point cloud into clusters using watershed segmentation on rasterized point cloud
-#remotes::install_github("Jean-Romain/lidR")
+remotes::install_github("Jean-Romain/lidR")
 library(dplR)
 library(sp)
 library(EBImage)
@@ -30,11 +30,6 @@ setwd("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS")
 
 
 
-
-
-
-
-
 ############################################ Tree Ring and Ground Fusion ####################################################
 
 #select the path for folder where you have the file to load
@@ -43,20 +38,25 @@ tree<-read.rwl("D:/projects/Babst_TLidar_Tree_Rings/CLN_TLS/Europe TLS Data/TLS 
 lidar = lidR::readLAS("D:/projects/Babst_TLidar_Tree_Rings/TLS_SantaRita_UBplot_pointcloud_041922_aligned_CC.las")
 
 
+
+###FUNCTION 1 - detrending and chronology###
 #check the class, you should see "rwl  "data.frame"
 class(tree)
-
 #some basic statistics
 dim(tree)
 rwl.stats(tree)
 options(max.print=1000000)
-
 #Spline
 detrend.rwi <- detrend(rwl = tree,method = "Spline")
 head(detrend.rwi)
 data.crn <- chron(detrend.rwi, prefix = "Chr", prewhiten = TRUE)
 
 
+
+
+
+
+###FUNCTION 2 - tree ring data parse and formatting###
 #raw tree ring data parsing and mean tree cores
 tree.data.parse <- detrend.rwi %>% 
   t() %>%
@@ -74,12 +74,17 @@ tree.data.parse <- detrend.rwi %>%
 #write.csv(data.transpose, file = "datatranspose.csv")
 
 
+
+
+
+
 ##RAW GROUND DATA
 coor <- c(51.079167, 10.453)
 tree23 <- destPoint(coor,110, 76)
 plotcenter <- destPoint(tree23,98, 28.1)
 
 
+###FUNCTION 3 - ground data azimuth and distance to coordinates###
 tls_ground_coor <- function(coor, dist_azim) {
   
   coor_list <- list() #creates empty list for new coordinates
@@ -111,6 +116,11 @@ tls_ground_coor <- function(coor, dist_azim) {
 Hainich_plot <- tls_ground_coor(coor, ground) 
 
 
+
+
+
+
+###FUNCTION 4 -  tree ring and ground data merge###
 ###TREE rings and ground merge#####
 treering_ground <- tree.data.parse %>%
   subset(site == "HF") %>%
@@ -122,6 +132,14 @@ treering_ground <- tree.data.parse %>%
   left_join(Hainich_plot, by = "treeID") 
 
 
+
+
+
+
+
+
+
+###FUNCTION 5 - DBH and Percentage reconstruction###
 ###DBH RECONSTRUCITONS
 diameter.recon.ground.tree <- function(treering_ground){
   treering_ground[is.na(treering_ground)] <- 0
@@ -150,20 +168,19 @@ return(diameter)
 DBH_estimate <- diameter.recon.ground.tree(treering_ground)
 
 
-
-
 ##PERCENTAGE DBH####
+DBH_perc_es
 # Identify the columns that have data of interest
-year_cols <- which(substr(x = colnames(FASY_treering_ground), start = 1, stop = 4) == "year")
-# Add column with total
-FASY_treering_ground$Total <- rowSums(x = FASY_treering_ground[, year_cols], na.rm = TRUE)
+year_cols <- which(substr(x = colnames(DBH_estimate), start = 1, stop = 4) == "year")
 # Make a copy of that data frame that we will use for percentages
-data.perc <- FASY_treering_ground
+data.perc <- DBH_estimate
 # Do percentage calculations for only those columns with data of interest
-data.perc[, year_cols] <- (data.perc[, year_cols] / data.perc$Total) * 100
+data.perc[, year_cols] <- (data.perc[, year_cols] / as.numeric(data.perc$DBH)) * 100
 # Reality check to see that percentages add up to 100
 all.equal(current = rowSums(data.perc[, year_cols], na.rm = TRUE),
           target = rep(100, length = nrow(data.perc)))
+
+
 
 
 
@@ -174,48 +191,25 @@ set_lidr_threads(30)
 get_lidr_threads()
 
 
-#Bring point cloud into Rstudio
-#The .las should be in a UTM coordinate system
-
-
-#Voxelize to reduce point cloud density to 1 pnt/5 cubic cm
-lidar_voxel = voxelize_points(lidar, 0.03)
-
-##I need a way to delete the points on periphery of the cloud that are outside of the 'plot'
-##I need to know the plot center coordinate and the radius of each plot
-#I have been experimenting with unreferenced point clouds. 
-xrange = range(lidar$X)
-center_coordx = mean(xrange)
-yrange = range(lidar$Y)
-center_coordy = mean(yrange)
-lidar_voxel_clip = clip_circle(lidar_voxel, center_coordx, center_coordy, 25)
-
-
-##Separate trees from ground using lidr
-lidar_classify = classify_ground(lidar_voxel_clip, algorithm = csf(sloop_smooth = TRUE, class_threshold = 0.1, cloth_resolution =  0.5, rigidness = 2))
-
-#Make a point cloud file for just ground lidar
-ground_lidar = filter_poi(lidar_classify, Classification == 2)
-
-#Make a point cloud file for just non-ground (trees) lidar
-tree_lidar = filter_poi(lidar_classify, Classification != 2)
-
-#Create a grided digital terrain model from ground lidar
-DTM = grid_terrain(ground_lidar, res = 0.5, algorithm = knnidw(k = 10, p = 2))
-
-#Calculate vertical distance of each tree point above the DTM. This creates a vegetation height point cloud.
-normalized_height = normalize_height(las = tree_lidar, algorithm = DTM)
-
-#Remove lidar that are vertically below 0.5 m
-AGL_clean = filter_poi(normalized_height, Z > 0.5)
-
+X <- X #X coordinate
+Y <- Y #Y coordinate
+lidar_voxel_clip = clip_circle(lidar_voxel, center_coordx, center_coordy, 25) #clip point cloud
+lidar_classify = classify_ground(lidar_voxel_clip, 
+                                 algorithm = csf(sloop_smooth = TRUE, 
+                                                 class_threshold = 0.1, 
+                                                 cloth_resolution =  0.5, 
+                                                 rigidness = 2)) ##Separate trees from ground using lidr
+ground_lidar = filter_poi(lidar_classify, Classification == 2) #Make a point cloud file for just ground lidar
+tree_lidar = filter_poi(lidar_classify, Classification != 2) #Make a point cloud file for just non-ground (trees) lidar
+DTM = grid_terrain(ground_lidar, res = 0.5, algorithm = knnidw(k = 10, p = 2)) #Create a grided digital terrain model from ground lidar
+normalized_height = normalize_height(las = tree_lidar, algorithm = DTM) #Calculate vertical distance of each tree point above the DTM. This creates a vegetation height point cloud.
+AGL_clean = filter_poi(normalized_height, Z > 0.5) #Remove lidar that are vertically below 0.5 m
 
 #Identify stems with 'TreeLS'
-
 #Identify tree occurrences for a normalized point cloud. It uses a Hough Transform which is a circle search
 #Merge is a distance between stems. If two occurrences are less than the specified distance, they will be merged. 
 
-tree_map = treeMap(AGL_clean, method = map.hough(min_h = 1, max_h = 3, h_step = 0.5, pixel_size = 0.025, 
+tree_map = TreeLS::treeMap(AGL_clean, method = map.hough(min_h = 1, max_h = 3, h_step = 0.5, pixel_size = 0.025, 
                                                  max_d = 0.85, min_density = 0.1, min_votes = 3), merge = 0.2, positions_only = FALSE)
 
 
@@ -244,6 +238,9 @@ proj4string(xy_ground) <- CRS("+proj=longlat +ellps=WGS84 +datum=WGS84")  ## for
 tree.points.ground <- spTransform(xy_ground, CRS("+proj=utm +zone=12 +ellps=WGS84")) %>% st_as_sf()
 
 
+
+
+
 ###tree_ring_ground_spatialpoints 2
 xy_ground <- data.frame(treeID = UB_plot_ground$plotID, X = UB_plot_ground$X, Y = UB_plot_ground$Y)
 coordinates(xy_ground) <- c("X", "Y")
@@ -256,6 +253,9 @@ xy_lidar <- data.frame(lidar_treeID = UB_plot_lidar$TreeID, X = UB_plot_lidar$X,
 coordinates(xy_lidar) <- c("X", "Y")
 proj4string(xy_lidar) <- CRS("+proj=utm +zone=12 +ellps=WGS84")  ## for example
 tree.points.lidar <- spTransform(xy_lidar, CRS("+proj=utm +zone=12 +ellps=WGS84")) %>% st_as_sf()
+
+
+
 
 st_crs(tree.points.ground) = st_crs(tree.points.lidar)
 tree.points.lidar_buffer = st_buffer(tree.points.lidar, 1.7)
